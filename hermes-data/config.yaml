@@ -1,0 +1,31 @@
+provider: "custom:groq"
+
+custom_providers:
+  - name: groq
+    base_url: https://api.groq.com/openai/v1
+    key_env: GROQ_API_KEY
+
+model:
+  default: llama-3.3-70b-versatile
+
+context_length: 128000
+max_tokens: 8192
+
+honcho:
+  enabled: true
+
+browser:
+  enabled: false
+
+stt:
+  provider: "local"
+  enabled: false
+
+streaming:
+  enabled: false
+
+memory:
+  enabled: true
+
+agent:
+  max_turns: 25
