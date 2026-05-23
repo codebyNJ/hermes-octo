@@ -1,43 +1,42 @@
-# Hermes + Honcho on Railway
+# Hermes on Koyeb + cloud Honcho
 
-Self-hosted personal second brain deployed to Railway from this GitHub repo. [Hermes Agent](https://github.com/NousResearch/hermes-agent) exposes an OpenAI-compatible API; [Honcho](https://github.com/plastic-labs/honcho) gives it long-term memory. Both run in one container, fronted by Cloudflare at a subdomain of your portfolio.
+Self-hosted personal second brain — deployed for **₹0/month with no credit card**. [Hermes Agent](https://github.com/NousResearch/hermes-agent) runs as a single-process container on Koyeb's free tier; memory is delegated to [Honcho's hosted cloud](https://honcho.dev) free tier.
 
 See [ARCHITECTURE.MD](ARCHITECTURE.MD) and [PRD.MD](PRD.MD) for the why.
 
 ## What's in the container
 
-One Docker image with three processes managed by supervisord:
+One Docker image, one process:
 
 | Process | Port | Public? | Purpose |
 | --- | --- | --- | --- |
 | `hermes gateway` | `$PORT` | yes | OpenAI-compatible `/v1/*` + `/health` |
-| `honcho api` | `8000` | no (localhost) | Memory backend Hermes talks to |
-| `honcho deriver` | — | no | Background worker that builds the user model |
 
-Postgres (with pgvector) lives outside the container as a Railway add-on. No Redis — Honcho runs with `CACHE_ENABLED=false`.
-
-Only one external API is used: **Groq**. The same `GROQ_API_KEY` powers both Hermes' inference and Honcho's deriver.
+Honcho lives outside the container as a cloud service. Hermes talks to it over HTTPS using `HONCHO_API_KEY`. There's no Postgres, no Redis, no supervisord — the brain is one container plus two API keys.
 
 ## Repo layout
 
 ```
 .
-├── Dockerfile               Single image. Clones Hermes + Honcho at build, installs both.
-├── supervisord.conf         3 processes: honcho-api, honcho-deriver, hermes-gateway.
-├── entrypoint.sh            Binds Hermes to $PORT, waits for Postgres, enables pgvector.
-├── railway.toml             Railway build + healthcheck config.
-├── honcho-config.json       Tells Hermes to talk to the local Honcho on 127.0.0.1:8000.
+├── Dockerfile               Single-stage. Clones Hermes at build, installs core only.
+├── entrypoint.sh            Binds Hermes to $PORT, validates env, execs `hermes gateway`.
 ├── hermes-data/
 │   └── config.yaml          Baked-in Hermes config (Groq provider, Honcho enabled).
-├── .env.example             Variables you need to set in Railway.
+├── .env.example             Variables you need to set in Koyeb.
 └── ARCHITECTURE.MD, PRD.MD
 ```
 
-There is no local dev / WSL2 setup required — everything builds inside the Railway container.
-
 ## Deploy
 
-### 1. Push this repo to GitHub
+### 1. Get the three secrets
+
+| Secret | Where |
+|---|---|
+| `API_SERVER_KEY` | `openssl rand -hex 32` (any random string) |
+| `GROQ_API_KEY` | https://console.groq.com — free, no card |
+| `HONCHO_API_KEY` | https://honcho.dev — free tier, no card |
+
+### 2. Push to GitHub
 
 ```bash
 git init
@@ -47,59 +46,56 @@ git remote add origin git@github.com:<you>/hermes.git
 git push -u origin main
 ```
 
-### 2. Create the Railway project from the GitHub repo
+### 3. Create the Koyeb service
 
+Two options — dashboard is quicker the first time, CLI is reproducible.
+
+**Dashboard:**
+1. https://app.koyeb.com/services/new
+2. Source → **GitHub** → pick your repo
+3. Builder → **Dockerfile** (auto-detected)
+4. Instance type → **Free** (Eco/Free Web)
+5. Environment variables → add all four from `.env.example`
+6. Health checks → HTTP `GET /health` on port `8000` (Koyeb's default `$PORT`)
+7. Deploy
+
+**CLI:**
 ```bash
-railway login
-railway init             # pick "Deploy from GitHub repo", select your repo
-railway link             # link this local folder so subsequent CLI calls target it
+curl -fsSL https://raw.githubusercontent.com/koyeb/koyeb-cli/master/install.sh | bash
+koyeb login
+koyeb service create hermes \
+  --git github.com/<you>/hermes \
+  --git-branch main \
+  --git-builder docker \
+  --instance-type free \
+  --regions fra \
+  --ports 8000:http \
+  --routes /:8000 \
+  --checks 8000:http:/health \
+  --env API_SERVER_KEY=@API_SERVER_KEY \
+  --env GROQ_API_KEY=@GROQ_API_KEY \
+  --env HONCHO_API_KEY=@HONCHO_API_KEY \
+  --env API_SERVER_CORS_ORIGINS=https://hermes.nijeeshnj.tech
 ```
 
-### 3. Attach Postgres (with pgvector)
+(The `@NAME` syntax pulls a secret you've previously created with `koyeb secret create NAME --value ...`.)
 
-```bash
-railway add --database postgres
-```
+### 4. Expose via your portfolio subdomain
 
-This provisions a Postgres service and injects `DATABASE_URL` into your app service. The `entrypoint.sh` script runs `CREATE EXTENSION IF NOT EXISTS vector;` on every boot, so pgvector is enabled automatically — no manual SQL needed.
-
-### 4. Set environment variables
-
-```bash
-railway variables \
-  --set API_SERVER_KEY=$(openssl rand -hex 32) \
-  --set API_SERVER_CORS_ORIGINS=https://hermes.nijeeshnj.tech \
-  --set GROQ_API_KEY=gsk_...
-```
-
-`DATABASE_URL` is auto-injected by the Postgres add-on — do not set it manually.
-
-### 5. Deploy
-
-```bash
-railway up
-```
-
-Railway reads [railway.toml](railway.toml), builds from the [Dockerfile](Dockerfile), and hits `/health` for liveness.
-
-### 6. Expose via your portfolio subdomain
-
-1. In Railway dashboard → your service → Settings → Networking → **Generate domain**. You'll get `<something>.up.railway.app`.
-2. In Cloudflare (the DNS for `nijeeshnj.tech`), add:
-
+1. Koyeb dashboard → service → Settings → **Domains** → add `hermes.nijeeshnj.tech`.
+2. Cloudflare DNS for `nijeeshnj.tech`:
    ```
    Type:   CNAME
    Name:   hermes
-   Target: <something>.up.railway.app
+   Target: <app>-<org>.koyeb.app
    Proxy:  ON  (orange cloud)
    ```
-
-3. (Optional but recommended) Railway → Settings → Networking → Custom domain → add `hermes.nijeeshnj.tech` so Railway issues a matching cert and avoids edge SSL loops.
+3. Koyeb auto-issues a Let's Encrypt cert. Cloudflare handles edge SSL.
 
 ## Verify
 
 ```bash
-railway logs                              # stream live container logs
+koyeb service logs hermes --follow      # stream live container logs
 
 curl https://hermes.nijeeshnj.tech/health
 # {"status":"ok"}
@@ -110,7 +106,7 @@ curl -H "Authorization: Bearer $API_SERVER_KEY" \
 
 ## Use it
 
-Any OpenAI-compatible client works:
+Any OpenAI-compatible client:
 
 ```bash
 curl https://hermes.nijeeshnj.tech/v1/chat/completions \
@@ -124,15 +120,23 @@ curl https://hermes.nijeeshnj.tech/v1/chat/completions \
 
 OpenCode, Open WebUI, TypingMind, Cursor's custom endpoint — all point at `https://hermes.nijeeshnj.tech/v1` with the bearer token.
 
-## Known constraints
+## Updates
 
-- **Cost is not ₹0.** Railway killed the free hobby tier in 2024. Expect ~$5/month on the Hobby plan once the trial credit runs out.
-- **RAM is tight.** Hermes + Honcho api + Honcho deriver in one 512MB container is borderline. If you see OOM kills in `railway logs`, split Honcho into its own Railway service.
-- **No Redis.** `CACHE_ENABLED=false` skips it. If Honcho's deriver crash-loops or throughput becomes a bottleneck, add a Railway Redis service and flip `CACHE_ENABLED=true` + `CACHE_URL=...`.
-- **No pgvector size cap.** Honcho doesn't expose a TTL knob today. If the Postgres add-on approaches its storage quota, prune `messages` / `embeddings` tables manually.
-- **Hermes' browser/audio tools are not installed** (no Playwright/Chromium/ffmpeg) — keeps the image lean. Web fetch via plain HTTP still works.
-- **`config.yaml` is committed in [hermes-data/](hermes-data/)**. If you ever want to change the model, system prompt, or persona (`SOUL.md`), edit it in-repo and `railway up` again.
+Push to `main` → Koyeb rebuilds and rolls out automatically. To pin Hermes to a specific commit, change `ARG HERMES_REF=main` in [Dockerfile](Dockerfile) and push.
 
-## Updating Hermes / Honcho versions
+## Known constraints (Koyeb free + Honcho cloud)
 
-The Dockerfile pins both projects to `main` via `--depth 1`. To pin to a specific commit or tag, change the `ARG HERMES_REF=main` / `ARG HONCHO_REF=main` lines in [Dockerfile](Dockerfile) and redeploy.
+- **Koyeb free tier: 512MB / 0.1 vCPU, single instance, no autoscale.** Plenty for personal single-user use. If Hermes gets sluggish under load, the bottleneck is the CPU quota, not RAM.
+- **Honcho cloud free tier limits apply.** Check honcho.dev for current quotas. If you hit them, the agent still works — it just stops getting smarter that month.
+- **No persistent disk in the container.** All long-term state lives in Honcho cloud. Anything written to the local filesystem is lost on redeploy.
+- **No browser/audio tools installed** (no Playwright/Chromium/ffmpeg). Web fetch via plain HTTP still works.
+- **Single region.** Pick one near you (`fra`, `was`, `sin`) when creating the service.
+
+## Switching providers later
+
+The container is Hermes-only — provider-agnostic. To swap LLM:
+- Edit `hermes-data/config.yaml` (model, base_url, key_env)
+- Add a new `LLM_*_API_KEY` env var to Koyeb if needed
+- Push
+
+To self-host Honcho later (Postgres + Redis), `git log` the older Railway-era commits in this repo — that scaffolding lived here briefly.
