@@ -42,6 +42,11 @@ import os, sys, time
 import psycopg
 
 dsn = os.environ["DATABASE_URL"]
+# Force IPv4 — HF Spaces has no IPv6, skip the unreachable attempts
+if "?" in dsn:
+    dsn += "&gssencmode=disable"
+else:
+    dsn += "?gssencmode=disable"
 for attempt in range(30):
     try:
         with psycopg.connect(dsn, connect_timeout=10, autocommit=True) as conn:
@@ -54,5 +59,8 @@ for attempt in range(30):
 print("[entrypoint] FATAL: could not connect to Neon Postgres", file=sys.stderr)
 sys.exit(1)
 PY
+
+cd /opt/honcho && /opt/honcho/.venv/bin/python -m alembic upgrade head
+echo "[entrypoint] Honcho DB migrations applied"
 
 exec /usr/bin/supervisord -c /etc/supervisor/conf.d/hermes.conf

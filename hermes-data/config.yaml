@@ -4,28 +4,71 @@ custom_providers:
   - name: groq
     base_url: https://api.groq.com/openai/v1
     key_env: GROQ_API_KEY
+  - name: openrouter
+    base_url: https://openrouter.ai/api/v1
+    key_env: OPENROUTER_API_KEY
 
 model:
   default: llama-3.3-70b-versatile
 
-context_length: 32768
-max_tokens: 4096
+fallback_providers:
+  - provider: custom:groq
+    model: llama-3.3-70b-versatile
+  - provider: custom:openrouter
+    model: meta-llama/llama-3.3-70b-instruct:free
+  - provider: custom:openrouter
+    model: deepseek/deepseek-chat-v3-0324:free
+  - provider: custom:openrouter
+    model: google/gemini-2.0-flash-exp:free
+
+context_length: 128000
+max_tokens: 8192
 
 honcho:
   enabled: true
 
 browser:
+  enabled: true
+
+computer:
   enabled: false
 
 stt:
   provider: "local"
   enabled: false
 
-streaming:
+tts:
   enabled: false
+
+skills:
+  enabled: false
+
+streaming:
+  enabled: true
 
 memory:
   enabled: true
 
 agent:
-  max_turns: 25
+  max_turns: 10
+  api_max_retries: 1
+  disabled_toolsets:
+    - cronjob
+    - delegation
+    - spotify
+    - discord
+    - discord_admin
+    - feishu_doc
+    - feishu_drive
+    - homeassistant
+    - computer_use
+    - image_gen
+    - video_gen
+    - kanban
+    - moa
+    - terminal
+    - tts
+    - vision
+    - video
+    - yuanbao
+    - clarify

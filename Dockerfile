@@ -24,6 +24,11 @@ RUN apt-get update \
         ripgrep \
         supervisor \
         tini \
+        xz-utils \
+        ffmpeg \
+        gnupg \
+ && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv
@@ -33,6 +38,7 @@ RUN git clone --branch ${HERMES_REF} --depth 1 \
 WORKDIR ${HERMES_INSTALL_DIR}
 RUN uv venv .venv --python 3.11 \
  && uv pip install --python ${HERMES_INSTALL_DIR}/.venv/bin/python -e . \
+ && uv pip install --python ${HERMES_INSTALL_DIR}/.venv/bin/python websockets \
  && ln -s ${HERMES_INSTALL_DIR}/.venv/bin/hermes /usr/local/bin/hermes
 
 RUN git clone --branch ${HONCHO_REF} --depth 1 \
