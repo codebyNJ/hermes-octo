@@ -10,7 +10,7 @@
   "contextCadence": "low",
   "dialecticCadence": "low",
   "dialecticReasoningLevel": "low",
-  "dialecticMaxChars": 600,
+  "dialecticMaxChars": 1000,
   "hosts": {
     "hermes": {
       "enabled": true,

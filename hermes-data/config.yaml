@@ -8,8 +8,8 @@ custom_providers:
 model:
   default: llama-3.3-70b-versatile
 
-context_length: 128000
-max_tokens: 8192
+context_length: 32768
+max_tokens: 4096
 
 honcho:
   enabled: true
