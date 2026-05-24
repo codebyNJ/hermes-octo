@@ -1,28 +1,37 @@
-# Hermes on Koyeb + cloud Honcho
+# Hermes + Honcho on Render + Neon
 
-Self-hosted personal second brain — deployed for **₹0/month with no credit card**. [Hermes Agent](https://github.com/NousResearch/hermes-agent) runs as a single-process container on Koyeb's free tier; memory is delegated to [Honcho's hosted cloud](https://honcho.dev) free tier.
+Self-hosted personal second brain. **₹0/month, no credit card.** [Hermes Agent](https://github.com/NousResearch/hermes-agent) + self-hosted [Honcho](https://github.com/plastic-labs/honcho) run in one Render free Docker container, backed by [Neon's](https://neon.com) free serverless Postgres with pgvector. Custom domain (`hermes.nijeeshnj.tech`) is fully supported.
 
 See [ARCHITECTURE.MD](ARCHITECTURE.MD) and [PRD.MD](PRD.MD) for the why.
 
-## What's in the container
+## What's running
 
-One Docker image, one process:
+One Render container, three supervisord-managed processes, one Neon database:
 
-| Process | Port | Public? | Purpose |
+| Process | Where | Port | Public? |
 | --- | --- | --- | --- |
-| `hermes gateway` | `$PORT` | yes | OpenAI-compatible `/v1/*` + `/health` |
+| `hermes gateway` | Render container | `$PORT` | yes (`/v1/*` + `/health`) |
+| `honcho api` | Render container | `8000` | no (localhost) |
+| `honcho deriver` | Render container | — | no |
+| Postgres + pgvector | Neon (separate) | — | no (only the Render container connects) |
 
-Honcho lives outside the container as a cloud service. Hermes talks to it over HTTPS using `HONCHO_API_KEY`. There's no Postgres, no Redis, no supervisord — the brain is one container plus two API keys.
+Three secrets power everything:
+- `API_SERVER_KEY` — bearer token clients must send
+- `GROQ_API_KEY` — Hermes inference + Honcho deriver reasoning (one key, two consumers)
+- `DATABASE_URL` — Neon Postgres connection string
 
 ## Repo layout
 
 ```
 .
-├── Dockerfile               Single-stage. Clones Hermes at build, installs core only.
-├── entrypoint.sh            Binds Hermes to $PORT, validates env, execs `hermes gateway`.
+├── Dockerfile               Single image. Clones Hermes + Honcho at build, installs both.
+├── supervisord.conf         3 processes: honcho-api, honcho-deriver, hermes-gateway.
+├── entrypoint.sh            Validates env, normalizes DATABASE_URL, enables pgvector, exec supervisord.
+├── render.yaml              Render Blueprint — wires the service up declaratively.
+├── honcho-config.json       Tells Hermes to talk to the local Honcho on 127.0.0.1:8000.
 ├── hermes-data/
 │   └── config.yaml          Baked-in Hermes config (Groq provider, Honcho enabled).
-├── .env.example             Variables you need to set in Koyeb.
+├── .env.example             Variables you set in Render's dashboard.
 └── ARCHITECTURE.MD, PRD.MD
 ```
 
@@ -30,13 +39,22 @@ Honcho lives outside the container as a cloud service. Hermes talks to it over H
 
 ### 1. Get the three secrets
 
-| Secret | Where |
-|---|---|
-| `API_SERVER_KEY` | `openssl rand -hex 32` (any random string) |
-| `GROQ_API_KEY` | https://console.groq.com — free, no card |
-| `HONCHO_API_KEY` | https://honcho.dev — free tier, no card |
+| Secret | Where | Card? |
+|---|---|---|
+| `API_SERVER_KEY` | `openssl rand -hex 32` | — |
+| `GROQ_API_KEY` | https://console.groq.com | No |
+| `DATABASE_URL` | https://console.neon.tech (next step) | No |
 
-### 2. Push to GitHub
+### 2. Create a Neon project (Postgres + pgvector)
+
+1. Sign up at https://console.neon.tech (GitHub/Google OAuth, no card)
+2. Create a project — pick the region closest to your Render region (Oregon if you use Render's default)
+3. From the project Dashboard, copy the **Connection string** (format: `postgresql://<user>:<pass>@<host>/<db>?sslmode=require`)
+4. The pgvector extension is created automatically by the container on first boot (`CREATE EXTENSION IF NOT EXISTS vector;` in [entrypoint.sh](entrypoint.sh)).
+
+Free Neon includes 0.5 GB storage and 100 compute-hours/month per project — plenty for personal use, but see "Known constraints" for how Honcho cadence is tuned to fit this.
+
+### 3. Push to GitHub
 
 ```bash
 git init
@@ -46,57 +64,56 @@ git remote add origin git@github.com:<you>/hermes.git
 git push -u origin main
 ```
 
-### 3. Create the Koyeb service
+### 4. Deploy on Render
 
-Two options — dashboard is quicker the first time, CLI is reproducible.
+**Easiest path — Blueprint (uses [render.yaml](render.yaml)):**
 
-**Dashboard:**
-1. https://app.koyeb.com/services/new
-2. Source → **GitHub** → pick your repo
-3. Builder → **Dockerfile** (auto-detected)
-4. Instance type → **Free** (Eco/Free Web)
-5. Environment variables → add all four from `.env.example`
-6. Health checks → HTTP `GET /health` on port `8000` (Koyeb's default `$PORT`)
-7. Deploy
+1. https://dashboard.render.com/blueprints → **New Blueprint Instance**
+2. Connect GitHub, pick the repo
+3. Render reads `render.yaml` and creates the service automatically
+4. When prompted, fill in the three `sync: false` env vars: `API_SERVER_KEY`, `GROQ_API_KEY`, `DATABASE_URL`
+5. **Apply**
 
-**CLI:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/koyeb/koyeb-cli/master/install.sh | bash
-koyeb login
-koyeb service create hermes \
-  --git github.com/<you>/hermes \
-  --git-branch main \
-  --git-builder docker \
-  --instance-type free \
-  --regions fra \
-  --ports 8000:http \
-  --routes /:8000 \
-  --checks 8000:http:/health \
-  --env API_SERVER_KEY=@API_SERVER_KEY \
-  --env GROQ_API_KEY=@GROQ_API_KEY \
-  --env HONCHO_API_KEY=@HONCHO_API_KEY \
-  --env API_SERVER_CORS_ORIGINS=https://hermes.nijeeshnj.tech
-```
+**Manual path:**
 
-(The `@NAME` syntax pulls a secret you've previously created with `koyeb secret create NAME --value ...`.)
+1. https://dashboard.render.com → **New** → **Web Service** → connect repo
+2. Runtime: **Docker** (auto-detected)
+3. Region: pick the same as your Neon project (e.g. Oregon)
+4. Plan: **Free**
+5. Add env vars: `API_SERVER_KEY`, `GROQ_API_KEY`, `DATABASE_URL`, `API_SERVER_CORS_ORIGINS`, `CACHE_ENABLED=false`
+6. Health check path: `/health`
+7. **Create Web Service**
 
-### 4. Expose via your portfolio subdomain
+First build takes ~5–10 minutes (cloning Hermes + Honcho, installing both venvs).
 
-1. Koyeb dashboard → service → Settings → **Domains** → add `hermes.nijeeshnj.tech`.
-2. Cloudflare DNS for `nijeeshnj.tech`:
+### 5. Custom domain
+
+1. Render dashboard → service → **Settings → Custom Domains → Add Custom Domain** → `hermes.nijeeshnj.tech`
+2. Render shows you a CNAME target. In Cloudflare DNS for `nijeeshnj.tech`:
    ```
    Type:   CNAME
    Name:   hermes
-   Target: <app>-<org>.koyeb.app
-   Proxy:  ON  (orange cloud)
+   Target: <render-target>.onrender.com
+   Proxy:  OFF  (grey cloud — for Render's Let's Encrypt to validate)
    ```
-3. Koyeb auto-issues a Let's Encrypt cert. Cloudflare handles edge SSL.
+3. Render auto-issues a Let's Encrypt cert in ~1–2 minutes.
+4. (Optional) Once the cert is live, flip Cloudflare proxy back to ON if you want their DDoS/edge cache.
+
+### 6. Keep it awake (important)
+
+Render free services **sleep after 15 minutes of inactivity** with a ~60-second cold start. For a personal brain you actually use, that's annoying.
+
+Set up UptimeRobot:
+1. https://uptimerobot.com — free signup, no card
+2. **Add New Monitor**
+   - Type: HTTPS
+   - URL: `https://hermes.nijeeshnj.tech/health`
+   - Interval: 5 minutes
+3. This consumes ~720 of your 750 free Render hours/month — barely fits. Watch the Render dashboard for hour usage in the first week.
 
 ## Verify
 
 ```bash
-koyeb service logs hermes --follow      # stream live container logs
-
 curl https://hermes.nijeeshnj.tech/health
 # {"status":"ok"}
 
@@ -120,23 +137,20 @@ curl https://hermes.nijeeshnj.tech/v1/chat/completions \
 
 OpenCode, Open WebUI, TypingMind, Cursor's custom endpoint — all point at `https://hermes.nijeeshnj.tech/v1` with the bearer token.
 
-## Updates
+## Known constraints
 
-Push to `main` → Koyeb rebuilds and rolls out automatically. To pin Hermes to a specific commit, change `ARG HERMES_REF=main` in [Dockerfile](Dockerfile) and push.
+- **Render free: 512 MB RAM, sleeps after 15 min idle, 750 instance-hours/month.** UptimeRobot pings keep it awake but eat ~720 hr/mo — you have ~30 hr/mo of headroom. If you hit it, the service forced-sleeps for the rest of the month.
+- **Neon free: 0.5 GB storage, 100 compute-hours/month per project.** Honcho's deriver is chatty — `honcho-config.json` is tuned to `contextCadence: low`, `dialecticCadence: low`, `dialecticReasoningLevel: low` to minimize Postgres traffic. If you hit the CU-hour cap, memory queries pause until next month.
+- **RAM is tight.** Hermes (~200 MB) + Honcho api (~100 MB) + Honcho deriver (~100 MB) ≈ 400 MB in a 512 MB container. If you see OOM kills in Render logs, the cleanest workaround is splitting Honcho out to a second Render service.
+- **No Redis.** `CACHE_ENABLED=false`. Honcho's deriver is slower without it but works. If throughput becomes a bottleneck, add a free Redis (e.g. Upstash free tier, no card) and flip the flag.
+- **Cold start ~60 s.** The first request after a forced sleep will hang for a minute. UptimeRobot mitigates this for the warmth-budget you have.
+- **No browser/audio tools** (no Playwright/Chromium/ffmpeg) — kept lean to fit RAM.
 
-## Known constraints (Koyeb free + Honcho cloud)
+## Updating Hermes / Honcho versions
 
-- **Koyeb free tier: 512MB / 0.1 vCPU, single instance, no autoscale.** Plenty for personal single-user use. If Hermes gets sluggish under load, the bottleneck is the CPU quota, not RAM.
-- **Honcho cloud free tier limits apply.** Check honcho.dev for current quotas. If you hit them, the agent still works — it just stops getting smarter that month.
-- **No persistent disk in the container.** All long-term state lives in Honcho cloud. Anything written to the local filesystem is lost on redeploy.
-- **No browser/audio tools installed** (no Playwright/Chromium/ffmpeg). Web fetch via plain HTTP still works.
-- **Single region.** Pick one near you (`fra`, `was`, `sin`) when creating the service.
+[Dockerfile](Dockerfile) pins both projects to `main`. To pin to a specific commit/tag, change `ARG HERMES_REF=main` / `ARG HONCHO_REF=main` and push — Render auto-rebuilds.
 
-## Switching providers later
+## If you outgrow this
 
-The container is Hermes-only — provider-agnostic. To swap LLM:
-- Edit `hermes-data/config.yaml` (model, base_url, key_env)
-- Add a new `LLM_*_API_KEY` env var to Koyeb if needed
-- Push
-
-To self-host Honcho later (Postgres + Redis), `git log` the older Railway-era commits in this repo — that scaffolding lived here briefly.
+When Render's sleep or Neon's CU-hour cap gets in the way:
+- **Oracle Cloud Always-Free** — 24 GB ARM VM, always-on, never expires. Card required for ID verification only (no charges). Move the whole stack onto one VM via docker-compose and stop juggling free tiers.
