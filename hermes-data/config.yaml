@@ -7,6 +7,12 @@ custom_providers:
   - name: openrouter
     base_url: https://openrouter.ai/api/v1
     key_env: OPENROUTER_API_KEY
+  - name: gemini
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    key_env: GEMINI_API_KEY
+  - name: local
+    base_url: http://127.0.0.1:8080/v1
+    key_env: LLAMA_LOCAL_API_KEY
 
 model:
   default: llama-3.3-70b-versatile
@@ -14,12 +20,14 @@ model:
 fallback_providers:
   - provider: custom:groq
     model: llama-3.3-70b-versatile
+  - provider: custom:gemini
+    model: gemini-2.0-flash-exp
+  - provider: custom:gemini
+    model: gemini-1.5-flash
   - provider: custom:openrouter
     model: meta-llama/llama-3.3-70b-instruct:free
-  - provider: custom:openrouter
-    model: deepseek/deepseek-chat-v3-0324:free
-  - provider: custom:openrouter
-    model: google/gemini-2.0-flash-exp:free
+  - provider: custom:local
+    model: xlam-1b-fc-r
 
 context_length: 128000
 max_tokens: 8192

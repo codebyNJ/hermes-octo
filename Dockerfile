@@ -46,6 +46,18 @@ RUN git clone --branch ${HONCHO_REF} --depth 1 \
 WORKDIR ${HONCHO_INSTALL_DIR}
 RUN uv sync --no-dev
 
+# Local LLM fallback: Salesforce xLAM-1b-fc-r (78.94% BFCL, tool-calling specialist, ~700MB)
+# Use prebuilt CPU wheel to skip C++ compilation (no g++ needed in image)
+ENV LLAMA_SERVER_DIR=/opt/llama-server \
+    LLAMA_MODEL_PATH=/opt/models/xlam-1b-fc-r-q4_k_m.gguf
+RUN mkdir -p ${LLAMA_SERVER_DIR} /opt/models \
+ && uv venv ${LLAMA_SERVER_DIR}/.venv --python 3.11 \
+ && uv pip install --python ${LLAMA_SERVER_DIR}/.venv/bin/python \
+        --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
+        "llama-cpp-python[server]" \
+ && curl -L -o ${LLAMA_MODEL_PATH} \
+        https://huggingface.co/Salesforce/xLAM-1b-fc-r-gguf/resolve/main/xLAM-1b-fc-r-q4_k_m.gguf
+
 RUN mkdir -p ${HERMES_HOME} \
              /root/.honcho \
              /var/log/hermes \

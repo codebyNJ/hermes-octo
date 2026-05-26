@@ -36,6 +36,7 @@ normalize_pg_url() {
 
 export DB_CONNECTION_URI="$(normalize_pg_url "${DATABASE_URL}")"
 export CACHE_ENABLED="${CACHE_ENABLED:-false}"
+export LLAMA_LOCAL_API_KEY="${LLAMA_LOCAL_API_KEY:-not-needed}"
 
 /opt/honcho/.venv/bin/python - <<'PY'
 import os, sys, time
