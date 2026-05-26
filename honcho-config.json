@@ -2,20 +2,25 @@
   "enabled": true,
   "baseUrl": "http://127.0.0.1:8000",
   "workspace": "hermes",
+  "peerName": "nijeesh",
   "aiPeer": "hermes",
+  "pinPeerName": true,
   "memoryMode": "hybrid",
   "writeFrequency": "async",
   "recallMode": "hybrid",
-  "sessionStrategy": "per-directory",
+  "sessionStrategy": "global",
+  "saveMessages": true,
   "contextCadence": "low",
   "dialecticCadence": "low",
   "dialecticReasoningLevel": "low",
-  "dialecticMaxChars": 1000,
+  "dialecticMaxChars": 300,
   "hosts": {
     "hermes": {
       "enabled": true,
       "workspace": "hermes",
-      "aiPeer": "hermes"
+      "peerName": "nijeesh",
+      "aiPeer": "hermes",
+      "pinPeerName": true
     }
   }
 }
