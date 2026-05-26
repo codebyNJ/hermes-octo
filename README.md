@@ -1,13 +1,3 @@
----
-title: Hermes
-emoji: 🧠
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # Hermes + Honcho on HF Spaces + Neon
 
 Self-hosted personal second brain. **₹0/month, no credit card.** [Hermes Agent](https://github.com/NousResearch/hermes-agent) + self-hosted [Honcho](https://github.com/plastic-labs/honcho) run in one HF Spaces Docker container (2 vCPU, 16 GB RAM), backed by [Neon's](https://neon.com) free serverless Postgres with pgvector. Memory persists across restarts because all state lives in Neon, not container disk.
