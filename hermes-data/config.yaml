@@ -1,6 +1,9 @@
-provider: "custom:groq"
+provider: "custom:zai"
 
 custom_providers:
+  - name: zai
+    base_url: https://api.z.ai/api/paas/v4
+    key_env: ZAI_API_KEY
   - name: groq
     base_url: https://api.groq.com/openai/v1
     key_env: GROQ_API_KEY
@@ -15,9 +18,11 @@ custom_providers:
     key_env: LLAMA_LOCAL_API_KEY
 
 model:
-  default: llama-3.3-70b-versatile
+  default: glm-4.7-flash
 
 fallback_providers:
+  - provider: custom:zai
+    model: glm-4.7-flash
   - provider: custom:groq
     model: llama-3.3-70b-versatile
   - provider: custom:gemini

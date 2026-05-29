@@ -16,6 +16,10 @@ if [[ -z "${GROQ_API_KEY:-}" ]]; then
   exit 1
 fi
 
+if [[ -z "${ZAI_API_KEY:-}" ]]; then
+  echo "[entrypoint] WARN: ZAI_API_KEY not set — primary provider (GLM-4.7-Flash) will skip to Groq fallback" >&2
+fi
+
 if [[ -z "${DATABASE_URL:-}" ]]; then
   echo "[entrypoint] FATAL: DATABASE_URL is not set (point this at your Neon Postgres)" >&2
   exit 1
