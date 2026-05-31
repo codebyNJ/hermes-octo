@@ -46,19 +46,19 @@ RUN git clone --branch ${HONCHO_REF} --depth 1 \
 WORKDIR ${HONCHO_INSTALL_DIR}
 RUN uv sync --no-dev
 
-# Local LLM fallback: Salesforce xLAM-1b-fc-r (78.94% BFCL, tool-calling specialist, ~700MB)
+# Local LLM fallback: NousResearch Hermes-3-Llama-3.2-3B (Q4_0, ChatML + tool use, ~2GB)
 # Use prebuilt CPU wheel to skip C++ compilation (no g++ needed in image)
 ENV LLAMA_SERVER_DIR=/opt/llama-server \
-    LLAMA_MODEL_PATH=/opt/models/xLAM-1b-fc-r.Q4_K_M.gguf
+    LLAMA_MODEL_PATH=/opt/models/Hermes-3-Llama-3.2-3B.Q4_0.gguf
 RUN mkdir -p ${LLAMA_SERVER_DIR} /opt/models \
  && uv venv ${LLAMA_SERVER_DIR}/.venv --python 3.11 \
  && uv pip install --python ${LLAMA_SERVER_DIR}/.venv/bin/python \
         --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
         "llama-cpp-python[server]" \
- && curl -fL -o ${LLAMA_MODEL_PATH} \
-        https://huggingface.co/Salesforce/xLAM-1b-fc-r-gguf/resolve/main/xLAM-1b-fc-r.Q4_K_M.gguf \
- && test -s ${LLAMA_MODEL_PATH} \
- && ls -lh ${LLAMA_MODEL_PATH}
+ && curl -fL --connect-timeout 10 -o ${LLAMA_MODEL_PATH} \
+        https://huggingface.co/NousResearch/Hermes-3-Llama-3.2-3B-GGUF/resolve/main/Hermes-3-Llama-3.2-3B.Q4_0.gguf \
+        || echo "⚠️  Model download failed (fallback disabled, cloud providers will be used)" \
+ && if test -s ${LLAMA_MODEL_PATH}; then ls -lh ${LLAMA_MODEL_PATH}; fi
 
 RUN mkdir -p ${HERMES_HOME} \
              /root/.honcho \

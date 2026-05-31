@@ -8,13 +8,13 @@ A single Docker container running four supervisord-managed processes:
 - `hermes-gateway` — public OpenAI-compatible API on port 7860
 - `honcho-api` — local memory backend on 127.0.0.1:8000
 - `honcho-deriver` — async memory worker
-- `llama-server` — local LLM (xLAM-1b-fc-r) as last-resort fallback on 127.0.0.1:8080
+- `llama-server` — local LLM (Hermes-3-Llama-3.2-3B) as last-resort fallback on 127.0.0.1:8080
 
 State (memory, embeddings, conversation history) lives in **Neon Postgres**, NOT the container disk. Container is ephemeral.
 
 ## Key files
 
-- [Dockerfile](Dockerfile) — builds the image (Python 3.11, Hermes + Honcho + llama-cpp-python + xLAM-1b GGUF)
+- [Dockerfile](Dockerfile) — builds the image (Python 3.11, Hermes + Honcho + llama-cpp-python + Hermes-3-Llama-3.2-3B GGUF)
 - [supervisord.conf](supervisord.conf) — process definitions
 - [entrypoint.sh](entrypoint.sh) — env validation, DB URL normalization, pgvector init, alembic migrations, exec supervisord
 - [honcho-config.json](honcho-config.json) — Hermes → local Honcho wiring (pinned peerName=nijeesh, global session)
@@ -30,7 +30,7 @@ Defined in `hermes-data/config.yaml` under `fallback_providers`:
 3. Gemini 2.0 Flash (1,500 RPD)
 4. Gemini 1.5 Flash (1,500 RPD)
 5. OpenRouter Llama 3.3 70B free
-6. Local xLAM-1b-fc-r (unlimited, slow)
+6. Local Hermes-3-Llama-3.2-3B (unlimited, slow)
 
 ## Deploy commands
 
@@ -49,7 +49,7 @@ NEVER commit real values to `.env.example`.
 - **Neon pooler URLs reject SQLAlchemy startup params.** Use the **direct** connection string (no `-pooler` in hostname). Drop `channel_binding=require` too — keep only `sslmode=require`.
 - **HF Spaces has no IPv6.** `entrypoint.sh` forces IPv4 by appending `gssencmode=disable`.
 - **Honcho API isn't a script — it's a server.** Must start with `uvicorn src.main:app`, NOT `python -m src.main`.
-- **xLAM is NOT a Functionary model.** Use `--chat_format chatml-function-calling`, not `functionary-v2`.
+- **Hermes-3 uses ChatML, not Functionary.** Keep `--chat_format chatml-function-calling`. Hermes-3's native `<tool_call>` XML tag style is *not* what llama-cpp-python's `chatml-function-calling` shim emits — the shim translates to/from OpenAI-style `tool_calls`, which is what the gateway expects.
 - **n_ctx 4096 is too small** for Hermes' system-prompt + tool-defs. Use ≥ 8192.
 - **HF Space web editor lets you accidentally paste into the wrong file.** If Dockerfile build error mentions `[supervisord]`, the files were swapped — re-push from local.
 

@@ -1,363 +1,267 @@
-# Architecture — Personal Second Brain (Hermes + self-hosted Honcho on Render + Neon)
+# Architecture — Hermes Second Brain
+
 **Owner:** Nijeesh NJ
-**Version:** 4.0
+**Version:** 5.0
 **Last Updated:** May 2026
 
----
-
-## 1. System Diagram
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                        ACCESS LAYER                          │
-│                                                              │
-│   Browser (laptop / phone)        OpenAI-compatible clients  │
-│   hermes.nijeeshnj.tech  ──┐  ┌── (OpenCode, Open WebUI,     │
-│                            │  │   TypingMind, curl, etc.)    │
-└────────────────────────────┼──┼──────────────────────────────┘
-                             │  │  HTTPS
-┌────────────────────────────┼──┼──────────────────────────────┐
-│                   CLOUDFLARE (free)                          │
-│                            │  │                              │
-│   CNAME hermes.nijeeshnj.tech → <hash>.onrender.com          │
-│   SSL termination · DDoS protection                          │
-└────────────────────────────┼──┼──────────────────────────────┘
-                             │  │
-┌────────────────────────────┼──┼──────────────────────────────┐
-│               RENDER FREE TIER  (Docker web service)         │
-│                            │  │                              │
-│   ┌────────────────────────▼──▼─────────────────────────┐    │
-│   │           container  (this Dockerfile)              │    │
-│   │           512 MB RAM · 0.1 vCPU                     │    │
-│   │           sleeps after 15 min idle                  │    │
-│   │           tini → supervisord                        │    │
-│   │                                                     │    │
-│   │      hermes gateway   :$PORT     ◄── public         │    │
-│   │           │                                         │    │
-│   │           │ HTTP loopback                           │    │
-│   │           ▼                                         │    │
-│   │      honcho api       :8000     ◄── localhost only  │    │
-│   │      honcho deriver   (worker)                      │    │
-│   │           │                                         │    │
-│   └───────────┼─────────────────────────────────────────┘    │
-└───────────────┼──────────────────────────────────────────────┘
-                │ DATABASE_URL (sslmode=require)
-                ▼
-┌────────────────────────────────────────────────┐
-│  NEON  (serverless Postgres, free tier)        │
-│                                                │
-│  Postgres + pgvector                           │
-│  0.5 GB storage · 100 CU-hr/mo                 │
-│  auto-suspends idle, sub-second cold start     │
-└────────────────────────────────────────────────┘
-
-UptimeRobot (free)  →  pings /health every 5 min  →  keeps Render warm
-```
+This doc explains how Hermes Second Brain is built and why each piece is there, in plain English. No prior infra background needed.
 
 ---
 
-## 2. Components
+## 1. The Big Picture
 
-### 2.1 Hermes Agent
-**What it is:** Open-source agent runtime by Nous Research ([NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent))
-**Public port:** `$PORT` (Render-assigned)
-**Role:** Receives any input, reasons, calls tools, returns OpenAI-compatible responses
-
-Exposes `/v1/chat/completions`, `/v1/models`, `/health`, `/health/detailed`. Hermes config baked into the image at [hermes-data/config.yaml](hermes-data/config.yaml); the local-Honcho wiring sits in [honcho-config.json](honcho-config.json) (copied to `/root/.honcho/config.json` at build time).
-
-Runtime env (set as Render env vars):
 ```
-API_SERVER_ENABLED=true
-API_SERVER_HOST=0.0.0.0
-API_SERVER_PORT=$PORT
-API_SERVER_KEY=<secret>
-API_SERVER_CORS_ORIGINS=https://hermes.nijeeshnj.tech
-GROQ_API_KEY=<secret>
-DATABASE_URL=<neon-secret>
-CACHE_ENABLED=false
+   Your apps (OpenCode, TypingMind, curl, etc.)
+                    │
+                    │  HTTPS + your bearer token
+                    ▼
+   ┌────────────────────────────────────────────────┐
+   │            HUGGING FACE SPACE                  │
+   │            (2 CPU · 16 GB RAM)                 │
+   │                                                │
+   │   ┌─────────────────────────────────────┐      │
+   │   │  hermes-gateway   (port 7860)       │◄─────┼─── Public API
+   │   │  the public front door              │      │
+   │   └─────────────────────────────────────┘      │
+   │      │            │             │              │
+   │      │  asks      │  calls      │  last        │
+   │      │  for       │  cloud      │  resort      │
+   │      │  memory    │  LLMs       │  fallback    │
+   │      ▼            ▼             ▼              │
+   │   honcho-api   OpenRouter   llama-server       │
+   │   (8000)       Z.AI         (8080, local CPU)  │
+   │   honcho-deriver                               │
+   │   (background worker)                          │
+   │      │                                         │
+   │      │  reads & writes memory                  │
+   └──────┼─────────────────────────────────────────┘
+          │
+          │  encrypted Postgres connection
+          ▼
+   ┌──────────────────────────┐
+   │  NEON (serverless        │
+   │  Postgres + pgvector)    │
+   │                          │
+   │  This is where YOUR      │
+   │  memories actually live. │
+   └──────────────────────────┘
+
+   UptimeRobot → pings /health every 5 min → keeps the Space awake
 ```
 
-**Not installed**: Node.js, Playwright/Chromium, ffmpeg, audio tools.
+The container is **disposable**. Hugging Face can restart it any time. Nothing important lives inside it — all your memory data is in Neon. Restarts cost you nothing.
 
 ---
 
-### 2.2 Honcho (self-hosted, in-container)
-**What it is:** Open-source AI memory backend by Plastic Labs ([plastic-labs/honcho](https://github.com/plastic-labs/honcho))
-**Internal port:** 8000 (localhost only)
-**Processes:** two (`api` + `deriver`)
-**Role:** Long-term memory — builds and maintains a model of Nijeesh across sessions
+## 2. What happens when you send a message
 
-Hermes is told to use the local Honcho via [honcho-config.json](honcho-config.json). Cadence knobs are tuned **low** to minimize Postgres traffic and stay within Neon's 100 CU-hr/mo quota:
+Walk through a single chat request end to end:
 
-```json
-{
-  "enabled": true,
-  "baseUrl": "http://127.0.0.1:8000",
-  "contextCadence": "low",
-  "dialecticCadence": "low",
-  "dialecticReasoningLevel": "low",
-  ...
-}
-```
+1. **Your client** sends a POST to `https://<you>-hermes.hf.space/v1/chat/completions` with a bearer token and a message.
+2. **hermes-gateway** receives it. Checks the token. Wrong token = 401.
+3. The gateway asks **honcho-api** (its local memory service) "what do I know about this user?" The answer — a compact summary of past observations — gets stitched into the system prompt.
+4. The gateway picks a model from the **fallback chain** (see §4) and calls it.
+5. If that model errors or times out, the gateway automatically retries with the next provider in the chain. The user never sees a failure unless **every** provider fails.
+6. The model's reply streams back to your client.
+7. **In the background**, honcho-deriver reads the new conversation and extracts facts worth remembering ("Nijeesh is doing his 4th year"). These get written to Neon as observations.
 
-Both Hermes and Honcho's deriver use the same `GROQ_API_KEY` (aliased to `LLM_GROQ_API_KEY` by [entrypoint.sh](entrypoint.sh)).
-
-**Memory persists across redeploys** because state lives in Neon, not the container.
+Next time you chat, step 3 finds those new facts and uses them. That's how memory persists.
 
 ---
 
-### 2.3 Neon Postgres + pgvector (external)
-**Provisioned at:** https://console.neon.tech
-**Connection:** `DATABASE_URL` env var; [entrypoint.sh](entrypoint.sh) normalizes it to `postgresql+psycopg://...` as Honcho expects and exports it as `DB_CONNECTION_URI`.
-**Extension:** `CREATE EXTENSION IF NOT EXISTS vector;` runs on every boot — no manual SQL.
+## 3. The Four Programs Inside the Container
 
-Free Neon quotas:
-- 0.5 GB storage
-- 100 CU-hours/project/month (≈ 400 hr at the smallest 0.25-CU shape)
-- Auto-suspends idle, sub-second cold start
+A small process manager called **supervisord** runs four programs. If any crash, supervisord restarts it.
 
----
+| Program | What it does | Where you reach it |
+|---|---|---|
+| `hermes-gateway` | The public API. Receives chat requests, runs the fallback chain, talks to memory, streams responses. | Port **7860**, public |
+| `honcho-api` | Memory service. Stores/retrieves observations, embeddings, conversation history. | Port **8000**, local only |
+| `honcho-deriver` | Background worker. Reads new messages, extracts facts, writes to Neon. | No port, runs continuously |
+| `llama-server` | A small 3B-parameter model (Hermes-3-Llama-3.2-3B) running on the container's own CPU. | Port **8080**, local only |
 
-### 2.4 Supervisord
-**Role:** Process manager inside the container.
-
-```
-tini (PID 1)
-  └── supervisord
-        ├── honcho-api        (restarts if crashes)
-        ├── honcho-deriver    (restarts if crashes)
-        └── hermes-gateway    (restarts if crashes)
-```
-
-Logs in `/var/log/honcho/*` and `/var/log/hermes/*`, surfaced via Render's log stream.
+Why a local model? Insurance. If every cloud provider in your fallback chain is rate-limited or down, the gateway can still respond — slowly, but it responds.
 
 ---
 
-### 2.5 No Redis (deliberate)
-`CACHE_ENABLED=false`. Honcho's deriver is slower but works. Trade-off accepted to avoid a third free-tier dependency.
+## 4. The LLM Fallback Chain
+
+Hermes doesn't pick one LLM and hope for the best. It walks down a list. Defined in [hermes-data/config.yaml](hermes-data/config.yaml):
+
+```
+1.  OpenRouter — nvidia/nemotron-3-super-120b-a12b:free  ← first choice
+2.  OpenRouter — poolside/laguna-m.1:free
+3.  OpenRouter — openai/gpt-oss-120b:free
+4.  OpenRouter — google/gemma-4-31b-it:free
+5.  Z.AI — glm-4.7-flash
+6.  Local — hermes-3-llama-3.2-3b                        ← last resort
+```
+
+Rules:
+- A **rate limit (429)** → skip to the next entry.
+- An **auth error (401)** → skip to the next entry.
+- A **bad request (400)** → skip to the next entry.
+- A successful response → stop, return it.
+
+OpenRouter sits at the top because four free models there give you a soft cushion before you start paying daily-cap costs on anything else. Z.AI's GLM-4.7-Flash is a strong general-purpose model but capped at 50 requests/day on the free tier. The local Hermes-3-3B is unlimited but slow (CPU inference, ~3 GB RAM, several seconds per response).
 
 ---
 
-### 2.6 UptimeRobot
-**Role:** Keep the Render container warm.
-**Endpoint pinged:** `https://hermes.nijeeshnj.tech/health` every 5 minutes.
+## 5. How Memory Actually Works
 
-Render's 750 free instance-hr/month is ~30 hr above 24/7 — pinging burns most of that. If you ever hit the cap, the service forced-sleeps for the rest of the month.
+Memory is the whole reason this exists. The setup:
 
----
+**Honcho** (open-source, by Plastic Labs) is a memory service designed for AI agents. It has two parts:
+- **honcho-api** — the synchronous read path. When the gateway needs context, it asks honcho-api and gets a quick answer.
+- **honcho-deriver** — the asynchronous write path. After each chat turn, it reads the new messages, runs a small LLM call to extract facts, and writes those observations to the database.
 
-## 3. Docker Container Design
+**Neon** is where Honcho stores everything. It's a "serverless" Postgres — that means the database goes to sleep when nobody's using it (sub-second wake-up) and you only pay (in compute-hours) for actual usage. The `pgvector` extension lets it store and search embeddings, which is how Honcho finds relevant past observations for the current conversation.
 
-### Single-container rationale
-- Hermes ↔ Honcho talk over `localhost` — no network hop, no DNS
-- One Dockerfile, one log stream, one healthcheck
-- Postgres is the only external dependency, and Neon manages it
+The connection between Honcho and Neon is normal Postgres over the public internet, protected by TLS. The connection string lives in the `DATABASE_URL` environment variable, set as a Hugging Face Secret. It is never written to disk inside the repo.
 
-### RAM budget (best estimate)
-```
-tini + supervisord     ~5 MB
-honcho api             ~100 MB
-honcho deriver         ~100 MB
-hermes gateway         ~200 MB
-─────────────────────────────
-Total                  ~405 MB    (in a 512 MB Render free container)
-```
-
-Tight. If OOM kills appear in Render logs, split Honcho out to a second Render service.
-
-### Container file layout
-```
-/opt/hermes-agent/        ← Hermes repo + .venv (built at image time)
-/opt/honcho/              ← Honcho repo + .venv (built at image time)
-
-/root/.hermes/            ← HERMES_HOME (baked from hermes-data/ in repo)
-  └── config.yaml         ← Groq provider + Honcho enabled
-
-/root/.honcho/
-  └── config.json         ← tells Hermes to use the local Honcho
-
-/etc/supervisor/conf.d/
-  └── hermes.conf         ← 3 program definitions
-
-/var/log/{hermes,honcho}/ ← rotating stdout/stderr logs
-```
+**Why this matters**: the Hugging Face container is ephemeral. Hugging Face can restart it for any reason — a build, a sleep, a hardware migration. Because all state is in Neon, every restart is invisible to you.
 
 ---
 
-## 4. Repo Layout
+## 6. The Extras (Web, GitHub, Skills)
+
+These are optional capabilities the agent uses **when relevant**, not on every turn.
+
+| Capability | What it adds | Backed by |
+|---|---|---|
+| **Web search & extract** | The agent can search the web and read pages. | [Exa](https://exa.ai) free tier — uses `EXA_API_KEY`. |
+| **GitHub access** | The agent can read your public repos, search code, list commits. | A GitHub MCP server, started by the container on demand. Needs `GITHUB_PERSONAL_ACCESS_TOKEN`. |
+| **Skills** | Small markdown playbooks the agent can load when a task matches. Examples in this repo: `hireme`, `understand-repo`, `learn-simple`, `gtm-research`. | Plain `.md` files in `hermes-data/skills/`. |
+
+Skills are just markdown. You can write new ones by dropping a `SKILL.md` file into the right folder and rebuilding.
+
+---
+
+## 7. What Lives Where (File Layout)
 
 ```
-hermes/                          ← git repo root
+hermes/                              ← this git repo
 │
-├── Dockerfile                   builds the image
-├── supervisord.conf             3 programs
-├── entrypoint.sh                env validation + pgvector init + supervisord exec
-├── render.yaml                  Render Blueprint
-├── honcho-config.json           Hermes → local-Honcho wiring (tuned cadence)
-├── .env.example                 documented env vars
-├── .dockerignore
-├── .gitignore
+├── Dockerfile                       Builds the container. Clones Hermes + Honcho,
+│                                    installs Python deps, downloads the local model.
 │
-├── hermes-data/                 baked into HERMES_HOME at build time
-│   └── config.yaml              Groq provider, Honcho enabled
+├── supervisord.conf                 Tells supervisord which 4 programs to run.
+├── entrypoint.sh                    First-boot setup: validates secrets, makes sure
+│                                    Postgres is reachable, runs DB migrations.
 │
-├── ARCHITECTURE.MD
-├── PRD.MD
-└── README.md
+├── honcho-config.json               Wires Hermes to the local Honcho on 127.0.0.1:8000.
+├── .env.example                     Documents which secrets you need (no real values).
+│
+├── hermes-data/                     Baked into /root/.hermes inside the container.
+│   ├── config.yaml                  Provider chain, model defaults, MCP servers, skills toggle.
+│   ├── SOUL.md                      The agent's persona/values.
+│   ├── memories/USER.md             What the agent "knows" about Nijeesh at build time.
+│   ├── memories/MEMORY.md           Index of additional memory files.
+│   └── skills/                      Markdown playbooks: eng/, gtm/, personal/.
+│
+├── README.md                        How to deploy.
+├── ARCHITECTURE.MD                  This file.
+└── AGENTS.md                        Internal notes for Claude Code.
+```
+
+Inside the running container:
+
+```
+/opt/hermes-agent/         The Hermes runtime (Python venv)
+/opt/honcho/               The Honcho service (Python venv)
+/opt/llama-server/         The local LLM server (Python venv)
+/opt/models/               The downloaded GGUF model file
+/root/.hermes/             Hermes' config home (copied from hermes-data/)
+/root/.honcho/             Honcho's config home
+/etc/supervisor/conf.d/    supervisord program definitions
 ```
 
 ---
 
-## 5. Deployment
+## 8. Memory Budget (Why It Fits in 16 GB)
 
-### One-time setup
-```bash
-# 1. Push to GitHub
-git init && git add . && git commit -m "initial deploy"
-git remote add origin git@github.com:<you>/hermes.git
-git push -u origin main
-
-# 2. Create a Neon Postgres project (https://console.neon.tech, no card)
-#    Copy the Connection string → use as DATABASE_URL
-
-# 3. Render dashboard → Blueprints → New Blueprint Instance
-#    Pick the GitHub repo. Render reads render.yaml automatically.
-#    Fill in the 3 sync:false env vars in the dashboard:
-#      API_SERVER_KEY=$(openssl rand -hex 32)
-#      GROQ_API_KEY=gsk_...
-#      DATABASE_URL=postgresql://...neon.tech/...?sslmode=require
-
-# 4. Custom domain
-#    Render → Settings → Custom Domains → add hermes.nijeeshnj.tech
-#    Cloudflare DNS → CNAME hermes → <render-target>.onrender.com (proxy OFF for cert issuance)
-
-# 5. Keep warm
-#    UptimeRobot → monitor https://hermes.nijeeshnj.tech/health every 5 min
+```
+supervisord + tini          ~10 MB
+honcho-api                  ~150 MB
+honcho-deriver              ~150 MB
+hermes-gateway              ~300 MB
+llama-server + 3B Q4 model  ~2.5 GB   (the big one)
+───────────────────────────────────
+Total                       ~3.1 GB   (out of 16 GB)
 ```
 
-### Every subsequent deploy
-```bash
-git push                     # Render auto-rebuilds via GitHub integration
-```
-
-### Monitor
-- Render dashboard → service → Logs tab (live stream + filters)
-- Neon dashboard → Monitoring tab (query log, storage usage, CU-hours)
-- UptimeRobot dashboard → uptime + response time history
+Plenty of headroom. The local model dominates because it's actually holding 3 billion weights in memory.
 
 ---
 
-## 6. Network Flow
+## 9. The Network Picture
 
 ```
-Request from any OpenAI-compatible client
-        │
-        │ HTTPS :443 + Bearer token
-        ▼
-Cloudflare  (hermes.nijeeshnj.tech)
-        │ proxies to Render origin
-        ▼
-Render ingress  →  container :$PORT
-        │
-        ▼
-hermes gateway
-        │ fetches Honcho memory context
-        ▼
-honcho api  (127.0.0.1:8000)
-        │ reads / writes
-        ▼
-Neon Postgres + pgvector  (over public internet, sslmode=require)
-        ▲
-        │ asynchronous writes
-        │
-honcho deriver  ←── extracts observations, runs dialectic
-        │ uses Groq for reasoning
-        ▼
-Groq API  (outbound HTTPS)
-
-(Meanwhile, hermes gateway uses Groq for the chat response and streams it back to the client.)
+Your client
+   │ HTTPS + Bearer token
+   ▼
+Hugging Face edge (TLS termination, free cert)
+   │
+   ▼
+hermes-gateway :7860
+   │                                 ┌─► honcho-api :8000  ─► Neon (Postgres)
+   ├── asks for memory context ──────┤
+   │                                 └─► honcho-deriver  ──► Neon (writes facts)
+   │
+   └── calls LLM provider in chain:
+         ├─► OpenRouter  (HTTPS, openrouter.ai)
+         ├─► Z.AI         (HTTPS, api.z.ai)
+         └─► llama-server :8080 (loopback, never leaves container)
 ```
+
+The gateway is the only thing the public internet sees. Everything else (Honcho, the local model) listens on `127.0.0.1` and is unreachable from outside.
 
 ---
 
-## 7. LLM Provider
-
-Only Groq is configured. Same `GROQ_API_KEY` consumed by:
-- Hermes' chat inference (`provider: custom:groq` in [hermes-data/config.yaml](hermes-data/config.yaml))
-- Honcho's deriver (`LLM_GROQ_API_KEY`, aliased from `GROQ_API_KEY` in [entrypoint.sh](entrypoint.sh))
-
-```
-Model:      llama-3.3-70b-versatile
-Rate limit: 30 req/min · 6000 tokens/min · 14400 req/day  (free tier)
-Latency:    200–400 ms
-Cost:       $0
-```
-
----
-
-## 8. DNS + SSL
-
-```
-Cloudflare → nijeeshnj.tech
-  Type:    CNAME
-  Name:    hermes
-  Target:  <hash>.onrender.com
-  Proxy:   OFF first  (for Render's Let's Encrypt validation)
-           ON later   (for Cloudflare DDoS / edge cache, once cert is live)
-```
-
-Render issues a free Let's Encrypt cert for the custom domain. Cloudflare handles edge SSL once you flip the proxy on.
-
----
-
-## 9. Security
+## 10. Security
 
 | Concern | Mitigation |
 |---|---|
-| Unauthorized API access | Bearer token (`API_SERVER_KEY`) required on `/v1/*` |
-| Origin IP exposure | Cloudflare proxy hides Render URL (after cert issuance) |
-| Secrets in Git | Only `.env.example` committed; real values are Render env vars |
-| Honcho exposed externally | Honcho api binds `127.0.0.1:8000` — only reachable from inside the container |
-| Postgres credentials | Injected via `DATABASE_URL`, sent over TLS to Neon |
-| Postgres data at rest | Neon encrypts at rest |
+| Random people calling your API | Bearer token check on every `/v1/*` request. |
+| API key leaks in Git | Only `.env.example` is committed. Real keys are Hugging Face Secrets. |
+| Honcho memory exposed | Honcho binds to `127.0.0.1:8000`, not reachable from outside the container. |
+| Postgres in transit | TLS enforced via `sslmode=require` on the Neon connection string. |
+| Postgres at rest | Neon encrypts disks. |
+| Local model misuse | Loopback only. Not part of the public API surface. |
+
+There is no admin UI, no dashboard, no user system. The bearer token is the single line of defense. Treat it like a password.
 
 ---
 
-## 10. Monitoring
+## 11. Known Limits
 
-- **Render**: dashboard → service → Logs tab. Streams live, plus historical filter.
-- **Neon**: dashboard → Monitoring → CU-hours used, storage used, query log.
-- **UptimeRobot**: dashboard → uptime % + response-time chart + alert history.
-
----
-
-## 11. Known Limitations (v4)
-
-| Limitation | Impact | Planned Fix |
+| Limit | What it means | Workaround |
 |---|---|---|
-| Render free: 15 min sleep, ~60 s cold start | First request after a forced sleep hangs | UptimeRobot pings every 5 min |
-| Render free: 750 instance-hr/month | Hard cap. UptimeRobot pings eat ~720 hr. ~30 hr headroom. | If hit, forced sleep until next month |
-| 512 MB container is tight for 3 processes | OOM risk under load | Split Honcho into its own Render service |
-| Neon free: 100 CU-hours/project/month | Heavy Honcho deriver traffic could exhaust this | Honcho cadence tuned `low` in honcho-config.json |
-| Neon free: 0.5 GB storage | Cap on memory growth | Prune old `messages` / `embeddings` rows |
-| No Redis | Slower deriver throughput | Add Upstash Redis (free, no card) if needed |
-| Groq rate limit (30 req/min) | Brief 429s under bursts | Add Gemini fallback later |
-| Single-region deploy | Latency from outside Oregon (or whatever you pick) | Acceptable for personal use |
+| Hugging Face sleep after ~48 h idle | First call after a forced sleep takes 30–60 seconds | UptimeRobot pings every 5 min |
+| Neon: 0.5 GB storage | Memory can fill up if you talk a lot every day | Periodically delete old `messages` rows |
+| Neon: 100 compute-hours/month | Background deriver eats this | Honcho's cadence is tuned `low` in config |
+| OpenRouter free models: per-day caps | Top of the chain may exhaust during heavy days | Chain automatically falls to Z.AI then local |
+| Z.AI free: 50 requests/day | Cheap fallback runs out quickly | Local model takes over |
+| Local model: slow on 2 CPU | Several seconds per token of output | Acceptable as last resort |
+| Hugging Face: no custom domain on free tier | Only `<user>-hermes.hf.space` works | Cloudflare redirect rule (browser only) or HF Pro ($9/mo) |
 
 ---
 
-## 12. Tech Stack
+## 12. Tech Stack at a Glance
 
-| Layer | Technology | Cost | Card? |
+| Layer | Software | Cost | Card required? |
 |---|---|---|---|
-| Agent runtime | Hermes Agent (Nous Research) | Free / OSS | — |
-| Memory | Honcho (Plastic Labs) | Free / OSS | — |
+| Agent runtime | Hermes Agent (Nous Research) | OSS | — |
+| Memory backend | Honcho (Plastic Labs) | OSS | — |
 | Database | Neon Postgres + pgvector | Free tier | No |
-| LLM provider | Groq (Llama 3.3 70B) | Free tier | No |
-| Process manager | Supervisord + tini | Free / OSS | — |
-| Container | Docker | Free / OSS | — |
-| Hosting | Render free tier | Free | No |
-| DNS + SSL | Cloudflare | Free | No |
-| Uptime monitor | UptimeRobot | Free | No |
-| Domain | nijeeshnj.tech | Already owned | — |
-| **Total** | | **₹0 / month** | **No** |
+| Primary LLMs | OpenRouter (free models) | Free tier | No |
+| Secondary LLM | Z.AI GLM-4.7-Flash | Free tier (50/day) | No |
+| Local LLM | Hermes-3-Llama-3.2-3B (NousResearch) | Free / OSS | — |
+| Web search | Exa | Free tier (1000/mo) | No |
+| Code access | GitHub MCP server | Free / OSS | — |
+| Hosting | Hugging Face Spaces | Free tier | No |
+| Container | Docker + supervisord + tini | OSS | — |
+| Uptime monitoring | UptimeRobot | Free tier | No |
+| **Total** | | **₹0/month** | **No card** |
+
+That's the whole system.

@@ -1,4 +1,4 @@
-provider: "custom:zai"
+provider: "custom:openrouter"
 
 custom_providers:
   - name: zai
@@ -18,21 +18,21 @@ custom_providers:
     key_env: LLAMA_LOCAL_API_KEY
 
 model:
-  default: glm-4.7-flash
+  default: nvidia/nemotron-3-super-120b-a12b:free
 
 fallback_providers:
+  - provider: custom:openrouter
+    model: nvidia/nemotron-3-super-120b-a12b:free
+  - provider: custom:openrouter
+    model: poolside/laguna-m.1:free
+  - provider: custom:openrouter
+    model: openai/gpt-oss-120b:free
+  - provider: custom:openrouter
+    model: google/gemma-4-31b-it:free
   - provider: custom:zai
     model: glm-4.7-flash
-  - provider: custom:groq
-    model: llama-3.3-70b-versatile
-  - provider: custom:gemini
-    model: gemini-2.0-flash-exp
-  - provider: custom:gemini
-    model: gemini-1.5-flash
-  - provider: custom:openrouter
-    model: meta-llama/llama-3.3-70b-instruct:free
   - provider: custom:local
-    model: xlam-1b-fc-r
+    model: hermes-3-llama-3.2-3b
 
 context_length: 128000
 max_tokens: 8192
@@ -41,7 +41,16 @@ honcho:
   enabled: true
 
 browser:
+  enabled: false   # off to save free-model context; web_extract handles static reads
+
+# Web search / extract backend. EXA_API_KEY is read from the container env
+# (set it as an HF Secret — NEVER inline the key here; this file is committed
+# and baked into the image). With OpenRouter as provider (no paid Nous Portal),
+# a backend key is REQUIRED or web_search/web_extract silently no-op.
+web:
   enabled: true
+  search_backend: exa
+  extract_backend: exa
 
 computer:
   enabled: false
@@ -54,13 +63,62 @@ tts:
   enabled: false
 
 skills:
-  enabled: false
+  enabled: true
 
 streaming:
   enabled: true
 
 memory:
   enabled: true
+
+# External tool servers. Each becomes an `mcp-<name>` toolset at runtime.
+# stdio servers inherit the gateway's env, so EXA_API_KEY (HF Secret) reaches
+# them without ever being written here. npx is available (Node 22 in the image).
+# ── Tool budget (free model) ────────────────────────────────────────────────
+# Every ENABLED MCP injects its tool definitions into the prompt EVERY turn.
+# On a free model that both burns context and makes tool-selection flaky. So:
+#   TIER 1 (always on): GitHub + Exa search. The daily drivers.
+#   TIER 3 (enabled:false): specialist servers — zero context cost until you
+#           flip one to true for a deep session, then flip it back.
+# Searching itself rides on the native web/search toolset (Exa backend), so the
+# `exa` MCP below is OFF by default to avoid duplicate search tools.
+mcp_servers:
+  # ── TIER 1 — always on ──
+  # GitHub — reads YOUR commits/PRs/repos (powers the hireme skill) + code search.
+  # GITHUB_PERSONAL_ACCESS_TOKEN inherited from the container env (HF Secret);
+  # a read-only / public-scope PAT is enough. No secret is written into this file.
+  github:
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    enabled: true
+
+  # ── TIER 3 — specialist, OFF by default (flip to true only for a deep session) ──
+
+  # Exa GTM tools (company_research_exa, competitor_finder, linkedin/people search,
+  # deep_search). Redundant with native Exa search for everyday use — turn on for
+  # a heavy GTM/market dive, used by the gtm-research skill.
+  exa:
+    command: "npx"
+    args: ["-y", "exa-mcp-server"]
+    enabled: false
+
+  # GitMCP — paste ANY public repo link, Q&A against its code+docs. Keyless.
+  # Used by the understand-repo skill. (web_extract covers light reads when off.)
+  gitmcp:
+    url: "https://gitmcp.io/docs"
+    enabled: false
+
+  # Context7 — up-to-date library / framework docs for coding. Keyless.
+  context7:
+    url: "https://mcp.context7.com/mcp"
+    enabled: false
+
+  # Yahoo Finance — prices, fundamentals, statements for finance/market sizing.
+  # Keyless, via uvx. Used by gtm-research / learn-simple's finance lens when on.
+  yahoo-finance:
+    command: "uvx"
+    args: ["mcp-yahoo-finance"]
+    enabled: false
 
 agent:
   max_turns: 10
@@ -85,3 +143,9 @@ agent:
     - video
     - yuanbao
     - clarify
+    # Trimmed to protect the free-model tool budget. Native web/search (Exa)
+    # covers reads; flip any back on if you actually need it.
+    - browser          # heavy: many automation tools; web_extract covers static reads
+    - code_execution   # execute_code; not for daily use (and an RCE surface)
+    - debugging        # composite (file+terminal+web) — redundant with file+web
+    - messaging        # send_message to other platforms — unused for API/chat access

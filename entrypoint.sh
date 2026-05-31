@@ -20,6 +20,14 @@ if [[ -z "${ZAI_API_KEY:-}" ]]; then
   echo "[entrypoint] WARN: ZAI_API_KEY not set — primary provider (GLM-4.7-Flash) will skip to Groq fallback" >&2
 fi
 
+if [[ -z "${EXA_API_KEY:-}" ]]; then
+  echo "[entrypoint] WARN: EXA_API_KEY not set — web_search/web_extract and the exa MCP will not work" >&2
+fi
+
+if [[ -z "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]]; then
+  echo "[entrypoint] WARN: GITHUB_PERSONAL_ACCESS_TOKEN not set — github MCP (hireme proof) will be rate-limited/unauthorized" >&2
+fi
+
 if [[ -z "${DATABASE_URL:-}" ]]; then
   echo "[entrypoint] FATAL: DATABASE_URL is not set (point this at your Neon Postgres)" >&2
   exit 1
