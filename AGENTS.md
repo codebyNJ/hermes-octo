@@ -56,6 +56,10 @@ NEVER commit real values to `.env.example`.
 ## Testing
 
 ```bash
+# hermes-data config cross-file checks (no pytest; also runs at Docker build —
+# a failed check fails the image build, so drift can't ship)
+python3 tests/test_hermes_data_config.py
+
 # Health
 curl https://<username>-hermes-octo.hf.space/health
 
