@@ -1,4 +1,4 @@
-provider: "custom:openrouter"
+provider: "custom:zai"   # primary — Z.AI GLM-4.7-Flash (50 RPD free), per AGENTS.md/MEMORY.md
 
 custom_providers:
   - name: zai
@@ -18,19 +18,19 @@ custom_providers:
     key_env: LLAMA_LOCAL_API_KEY
 
 model:
-  default: nvidia/nemotron-3-super-120b-a12b:free
+  default: glm-4.7-flash
 
 fallback_providers:
-  - provider: custom:openrouter
-    model: nvidia/nemotron-3-super-120b-a12b:free
-  - provider: custom:openrouter
-    model: poolside/laguna-m.1:free
-  - provider: custom:openrouter
-    model: openai/gpt-oss-120b:free
-  - provider: custom:openrouter
-    model: google/gemma-4-31b-it:free
   - provider: custom:zai
     model: glm-4.7-flash
+  - provider: custom:groq
+    model: groq/llama-3.3-70b-versatile
+  - provider: custom:gemini
+    model: gemini-2.0-flash
+  - provider: custom:gemini
+    model: gemini-1.5-flash
+  - provider: custom:openrouter
+    model: meta-llama/llama-3.3-70b-instruct:free
   - provider: custom:local
     model: hermes-3-llama-3.2-3b
 
@@ -70,6 +70,7 @@ streaming:
 
 memory:
   enabled: true
+  provider: honcho   # select Honcho as the active memory provider (loads its tools + post-response save). Without this, no provider is active and nothing persists.
 
 # External tool servers. Each becomes an `mcp-<name>` toolset at runtime.
 # stdio servers inherit the gateway's env, so EXA_API_KEY (HF Secret) reaches
@@ -113,6 +114,20 @@ mcp_servers:
     url: "https://mcp.context7.com/mcp"
     enabled: false
 
+  # Fetch — read ANY URL -> clean markdown for the agent. Keyless, lightweight.
+  fetch:
+    command: "uvx"
+    args: ["mcp-server-fetch"]
+    enabled: false
+
+  # Playwright — full browser automation (click, fill, JS-rendered pages, screenshots).
+  # Heavy: needs chromium baked in the image (see Dockerfile) AND injects many tools
+  # every turn. Flip to false for light sessions to protect the tool budget.
+  playwright:
+    command: "npx"
+    args: ["-y", "@playwright/mcp@0.0.79", "--headless", "--browser", "chromium"]
+    enabled: false
+
   # Yahoo Finance — prices, fundamentals, statements for finance/market sizing.
   # Keyless, via uvx. Used by gtm-research / learn-simple's finance lens when on.
   yahoo-finance:
@@ -121,8 +136,8 @@ mcp_servers:
     enabled: false
 
 agent:
-  max_turns: 10
-  api_max_retries: 1
+  max_turns: 120
+  api_max_retries: 3
   disabled_toolsets:
     - cronjob
     - delegation
